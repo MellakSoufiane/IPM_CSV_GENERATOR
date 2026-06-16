@@ -27,82 +27,103 @@ function getDateTime() {
   return `${yyyy}${mm}${dd}_${hh}${mi}${ss}`;
 }
 
-async function generateIPM(pan, aliaspan) {
-  if (!aliaspan || !pan) throw new Error("alias_pan and pan are required");
-
-  const client = new Client({
-    user: process.env.DB_USER,
-    host: process.env.DB_HOST,
-    database: process.env.DB_NAME,
-    password: process.env.DB_PASSWORD,
-    port: process.env.DB_PORT
+// Fonction utilitaire pour traiter le fichier et appeler cardutil
+async function finalizeAndConvert(records) {
+  let csvContent = CSV_COLUMNS.join(",") + "\n";
+  records.forEach(record => {
+    const rowArr = CSV_COLUMNS.map(col => {
+      let val = record[col] !== undefined ? record[col] : "";
+      if (String(val).includes(",")) val = `"${val}"`;
+      return val;
+    });
+    csvContent += rowArr.join(",") + "\n";
   });
 
+  const timestamp = Date.now();
+  const csvFile = `extract_${timestamp}.csv`;
+  fs.writeFileSync(csvFile, csvContent);
+  console.log(`Fichier CSV généré : ${csvFile}`);
+
+  const finalFile = `HPS_MCI_Clearing_File_${getDateTime()}.ipm`;
+  console.log("Conversion du CSV vers IPM via cardutil...");
+  execSync(`mci_csv_to_ipm ${csvFile} -o ${finalFile} --out-encoding cp500`, { stdio: "inherit" });
+  fs.unlinkSync(csvFile);
+  return finalFile;
+}
+
+// 1. API ORIGINALE (Par PAN/Alias)
+async function generateIPM(pan, aliaspan) {
+  if (!aliaspan || !pan) throw new Error("alias_pan and pan are required");
+  const client = new Client({ user: process.env.DB_USER, host: process.env.DB_HOST, database: process.env.DB_NAME, password: process.env.DB_PASSWORD, port: process.env.DB_PORT });
   await client.connect();
 
   try {
-    const cardRes = await client.query(
-      `SELECT card_number FROM card WHERE alias_pan = $1`, [aliaspan]
-    );
-
+    const cardRes = await client.query(`SELECT card_number FROM card WHERE alias_pan = $1`, [aliaspan]);
     if (cardRes.rows.length === 0) throw new Error("No card found");
     const tokenpan = cardRes.rows[0].card_number;
 
-    const res = await client.query(
-      `SELECT * FROM approved_authorization WHERE card_number = $1`, [tokenpan]
-    );
-    const rows = res.rows;
-    if (!rows.length) throw new Error("No authorization found");
+    const res = await client.query(`SELECT * FROM approved_authorization WHERE card_number = $1`, [tokenpan]);
+    if (!res.rows.length) throw new Error("No authorization found");
 
-    const totalTransactions = rows.length + 2;
-    const totalAmountMinorUnits = rows.reduce((sum, row) => sum + Math.round(Number(row.billing_amount || 0) * 100), 0);
-    const formattedTotal = String(totalAmountMinorUnits).padStart(16, "0");
-
+    const totalTransactions = res.rows.length + 2;
+    const totalAmount = res.rows.reduce((sum, row) => sum + Math.round(Number(row.billing_amount || 0) * 100), 0);
+    
     let de71Sequence = 1;
     const nextDe71 = () => String(de71Sequence++).padStart(8, "0");
 
-    // 1. Construction du tableau d'objets plats
     const records = [
       build1644("PRE", {}, nextDe71()),
-      ...rows.map(row => build1240(row, pan, nextDe71())),
-      build1644("POST", { totalAmount: formattedTotal, totalTransactions }, nextDe71())
+      ...res.rows.map(row => build1240(row, pan, nextDe71())),
+      build1644("POST", { totalAmount: String(totalAmount).padStart(16, "0"), totalTransactions }, nextDe71())
     ];
 
-    // 2. Conversion en format CSV
-    let csvContent = CSV_COLUMNS.join(",") + "\n";
-    
-    records.forEach(record => {
-      const rowArr = CSV_COLUMNS.map(col => {
-        let val = record[col] !== undefined ? record[col] : "";
-        // Sécuriser les champs contenant des virgules
-        if (String(val).includes(",")) val = `"${val}"`; 
-        return val;
-      });
-      csvContent += rowArr.join(",") + "\n";
-    });
-
-    const timestamp = Date.now();
-    const csvFile = `extract_${timestamp}.csv`;
-    fs.writeFileSync(csvFile, csvContent);
-    console.log(`Fichier CSV généré : ${csvFile}`);
-
-    // 3. Appel de cardutil pour générer l'IPM EBCDIC
-    const finalFile = `HPS_MCI_Clearing_File_${getDateTime()}.ipm`;
-
-    console.log("Conversion du CSV vers IPM via cardutil...");
-    execSync(
-      `mci_csv_to_ipm ${csvFile} -o ${finalFile} --out-encoding cp500`,
-      { stdio: "inherit" }
-    );
-
-    // Nettoyage du fichier CSV intermédiaire
-    fs.unlinkSync(csvFile);
-
-    return finalFile;
-
+    return await finalizeAndConvert(records);
   } finally {
     await client.end();
   }
 }
 
-module.exports = { generateIPM };
+// 2. NOUVELLE API (Multi-critères Batch)
+async function generateMultiCriteriaIPM(groups) {
+  const client = new Client({ user: process.env.DB_USER, host: process.env.DB_HOST, database: process.env.DB_NAME, password: process.env.DB_PASSWORD, port: process.env.DB_PORT });
+  await client.connect();
+  const allRows = [];
+  
+  try {
+    for (const group of groups) {
+    
+      for (const ref of group.references) {
+        const res = await client.query(
+          `SELECT * FROM approved_authorization WHERE reference_number = $1`, 
+          [ref]
+        );
+        
+        // On traite chaque ligne trouvée
+        res.rows.forEach(r => {
+          // ICI : On injecte le group.pan (celui de la requête) au lieu de r.card_number
+          allRows.push({ 
+            row: r, 
+            panPourFichier: group.pan 
+          });
+        });
+      }
+    }
+    if (allRows.length === 0) throw new Error("Aucune autorisation trouvée pour les références fournies.");
+
+    let de71Sequence = 1;
+    const nextDe71 = () => String(de71Sequence++).padStart(8, "0");
+    const totalAmount = allRows.reduce((sum, item) => sum + Math.round(Number(item.row.billing_amount || 0) * 100), 0);
+
+    const records = [
+      build1644("PRE", {}, nextDe71()),
+      ...allRows.map(item => build1240(item.row, item.panPourFichier, nextDe71())),
+      build1644("POST", { totalAmount: String(totalAmount).padStart(16, "0"), totalTransactions: allRows.length + 2 }, nextDe71())
+    ];
+
+    return await finalizeAndConvert(records);
+  } finally {
+    await client.end();
+  }
+}
+
+module.exports = { generateIPM, generateMultiCriteriaIPM };
