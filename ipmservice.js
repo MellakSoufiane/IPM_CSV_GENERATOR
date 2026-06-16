@@ -14,7 +14,7 @@ const OUTPUT_DIR = "C:\\Users\\Public\\CBA\\IPM_CSV_GENERATOR\\output";
 
 // Colonnes exactes attendues par cardutil
 const CSV_COLUMNS = [
-  "MTI","DE2","DE3","DE4","DE12","DE14","DE22","DE23","DE24","DE25","DE26",
+  "MTI","DE2","DE3","DE4","DE5","DE6","DE12","DE14","DE22","DE23","DE24","DE25","DE26",
   "DE30","DE31","DE33","DE37","DE38","DE40","DE41","DE42","DE48","DE49","DE50",
   "DE63","DE71","DE73","DE93","DE94","DE95","DE100","PDS0023","PDS0052","PDS0122",
   "PDS0148","PDS0158","PDS0165","DE43_NAME","DE43_SUBURB","DE43_POSTCODE","ICC_DATA"
