@@ -1,0 +1,42 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Environment
+.env
+.env.*.local
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs / coverage / build
+logs/
+*.log
+coverage/
+dist/
+build/
+
+# Temporary
+*.tmp
+*.temp
+*.bak
+
+# Common DB / caches
+*.db
+.cache/
+
+# Project-specific outputs
+*.csv
+*.ipm
+extract_*.csv
+HPS_MCI_Clearing_File_*.ipm
