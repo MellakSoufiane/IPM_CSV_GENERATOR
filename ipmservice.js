@@ -63,7 +63,7 @@ async function finalizeAndConvert(records) {
   // Nettoyage du fichier CSV intermédiaire
   fs.unlinkSync(csvFile);
   
-  return finalFilePath; // Retourne le chemin complet du fichier généré
+  return path.basename(finalFilePath); // Retourne le chemin complet du fichier généré
 }
 
 // 1. API ORIGINALE (Par PAN/Alias)
