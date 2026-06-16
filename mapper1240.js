@@ -87,8 +87,8 @@ function build1240(row, inputPan, de71) {
     DE2: inputPan || "5367635001039824",
     DE3: (row.processing_code || "000000").toString().padEnd(6, "0"),
     DE4: formatAmount(row.transaction_amount),
-    DE4: formatAmount(row.billing_amount),
-    DE4: formatAmount(row.billing_amount),
+    DE5: formatAmount(row.billing_amount),
+    DE6: formatAmount(row.billing_amount),
     DE12: formatDatetime(row.transaction_local_date),
     DE14: "2512", // YYMM formaté
     DE22: (row.pos_data || "000000000000").slice(0, 12),
