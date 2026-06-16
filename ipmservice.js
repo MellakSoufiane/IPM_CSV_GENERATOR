@@ -3,10 +3,14 @@ require("dotenv").config();
 
 const { Client } = require("pg");
 const fs = require("fs");
+const path = require("path");
 const { execSync } = require("child_process");
 
 const { build1240 } = require("./mapper1240");
 const { build1644 } = require("./mapper1644");
+
+// Chemin vers le dossier de sortie
+const OUTPUT_DIR = "C:\\Users\\Public\\CBA\\IPM_CSV_GENERATOR\\output";
 
 // Colonnes exactes attendues par cardutil
 const CSV_COLUMNS = [
@@ -29,6 +33,11 @@ function getDateTime() {
 
 // Fonction utilitaire pour traiter le fichier et appeler cardutil
 async function finalizeAndConvert(records) {
+  // Créer le dossier output s'il n'existe pas
+  if (!fs.existsSync(OUTPUT_DIR)) {
+    fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+  }
+
   let csvContent = CSV_COLUMNS.join(",") + "\n";
   records.forEach(record => {
     const rowArr = CSV_COLUMNS.map(col => {
@@ -40,15 +49,21 @@ async function finalizeAndConvert(records) {
   });
 
   const timestamp = Date.now();
-  const csvFile = `extract_${timestamp}.csv`;
+  const csvFile = path.join(OUTPUT_DIR, `extract_${timestamp}.csv`); // CSV dans le dossier output
   fs.writeFileSync(csvFile, csvContent);
   console.log(`Fichier CSV généré : ${csvFile}`);
 
-  const finalFile = `HPS_MCI_Clearing_File_${getDateTime()}.ipm`;
+  const finalFileName = `HPS_MCI_Clearing_File_${getDateTime()}.ipm`;
+  const finalFilePath = path.join(OUTPUT_DIR, finalFileName);
+
   console.log("Conversion du CSV vers IPM via cardutil...");
-  execSync(`mci_csv_to_ipm ${csvFile} -o ${finalFile} --out-encoding cp500`, { stdio: "inherit" });
+  // On passe les chemins complets à la commande
+  execSync(`mci_csv_to_ipm "${csvFile}" -o "${finalFilePath}" --out-encoding cp500`, { stdio: "inherit" });
+  
+  // Nettoyage du fichier CSV intermédiaire
   fs.unlinkSync(csvFile);
-  return finalFile;
+  
+  return finalFilePath; // Retourne le chemin complet du fichier généré
 }
 
 // 1. API ORIGINALE (Par PAN/Alias)
