@@ -9,8 +9,13 @@ const { execSync } = require("child_process");
 const { build1240 } = require("./mapper1240");
 const { build1644 } = require("./mapper1644");
 
-// Chemin vers le dossier de sortie
-const OUTPUT_DIR = "C:\\Users\\Public\\CBA\\IPM_CSV_GENERATOR\\output";
+// Définition du chemin relatif
+const OUTPUT_DIR = path.join(__dirname, "output");
+
+// Vérifier si le dossier existe, sinon le créer automatiquement
+if (!fs.existsSync(OUTPUT_DIR)) {
+    fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+}
 
 // Colonnes exactes attendues par cardutil
 const CSV_COLUMNS = [
