@@ -168,6 +168,7 @@ async function generateMultiCriteriaIPM2(groups) {
           allRows.push({
               row: r,
               panPourFichier: group.pan,
+              arn: group.arn,
               functionCode: group.functionCode,
               transactionId: group.transactionId
           });
@@ -184,6 +185,7 @@ async function generateMultiCriteriaIPM2(groups) {
       build1644("PRE", {}, nextDe71()),
       ...allRows.map(item =>  build1240_ref(item.row, item.panPourFichier, nextDe71(), {
         functionCode: item.functionCode,
+        arn: item.arn,
         transactionId: item.transactionId
       })),
       build1644("POST", { totalAmount: String(totalAmount).padStart(16, "0"), totalTransactions: allRows.length + 2 }, nextDe71())

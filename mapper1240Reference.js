@@ -123,7 +123,7 @@ function build1240_ref(row, inputPan, de71, overrides = {}) {
     DE25: "1401",
     DE26: row.card_acceptor_activity || "5542",
     DE30: "000000010000000000000000",
-    DE31: `0230120${yearDigit}${dayOfYear}${seq}${chk}`, // Concaténation des sous-éléments
+    DE31: (overrides.arn||`0230120${yearDigit}${dayOfYear}${seq}${chk}`), // Concaténation des sous-éléments
     DE33: row.acquirer_institution_code || "002108",
     DE37: row.reference_number || "000000000000",
     DE38: row.authorization_code || "030160",
