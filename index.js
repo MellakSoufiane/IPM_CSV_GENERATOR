@@ -1,7 +1,7 @@
 // index.js
 require("dotenv").config();
 const express = require("express");
-const { generateIPM,generateMultiCriteriaIPM } = require("./ipmservice");
+const { generateIPM,generateMultiCriteriaIPM, generateMultiCriteriaIPM2 } = require("./ipmservice");
 
 const app = express();
 app.use(express.json()); // Pour intercepter le format JSON
@@ -52,6 +52,27 @@ app.post("/api/v1/clearing/generate-reference", async (req, res) => {
   try {
     console.log(`🚀 Traitement de ${groups.length} groupes de transactions...`);
     const fileName = await generateMultiCriteriaIPM(groups);
+    
+    return res.status(200).json({ success: true, file: fileName });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ==========================================
+// NOUVEAU ENDPOINT (Isolé - Multi-critères Batch)
+// ==========================================
+app.post("/api/v2/clearing/generate-reference", async (req, res) => {
+  // On s'attend directement à un tableau d'objets comme vous l'avez défini
+  const groups = req.body; 
+
+  if (!groups || !Array.isArray(groups)) {
+    return res.status(400).json({ success: false, error: "Format invalide : attend un tableau d'objets." });
+  }
+
+  try {
+    console.log(`🚀 Traitement de ${groups.length} groupes de transactions...`);
+    const fileName = await generateMultiCriteriaIPM2(groups);
     
     return res.status(200).json({ success: true, file: fileName });
   } catch (error) {

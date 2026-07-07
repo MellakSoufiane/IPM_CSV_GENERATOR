@@ -68,7 +68,7 @@ function buildPDSString(tag, value) {
 
 let acquirerSequenceNumber = 23958022189;
 
-function build1240(row, inputPan, de71) {
+function build1240_ref(row, inputPan, de71, overrides = {}) {
   const now = new Date();
   const yearDigit = String(now.getFullYear()).slice(-1);
   const startOfYear = new Date(now.getFullYear(), 0, 0);
@@ -119,7 +119,7 @@ function build1240(row, inputPan, de71) {
     DE14: formatDateToYYMM(row.end_expiry_date), // YYMM formaté
     DE22: (row.pos_data || "000000000000").slice(0, 12),
     DE23: "001",
-    DE24: "200",
+    DE24: overrides.functionCode || "200",
     DE25: "1401",
     DE26: row.card_acceptor_activity || "5542",
     DE30: "000000010000000000000000",
@@ -140,7 +140,7 @@ function build1240(row, inputPan, de71) {
     DE49: row.transaction_currency || "036",
     DE50: "036",
     DE51: "036",
-    DE63: " " + (row.transaction_id || "MCC6100AA0601  "),
+    DE63: " " + (overrides.transactionId || row.transaction_id || "MCC6100AA0601  "),
     DE71: de71,
     DE73: row.reason_code || "010101",
     DE93: "035083",
@@ -162,4 +162,4 @@ function build1240(row, inputPan, de71) {
   };
 }
 
-module.exports = { build1240 };
+module.exports = { build1240_ref };

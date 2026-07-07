@@ -7,6 +7,7 @@ const path = require("path");
 const { execSync } = require("child_process");
 
 const { build1240 } = require("./mapper1240");
+const { build1240_ref } = require("./mapper1240Reference");
 const { build1644 } = require("./mapper1644");
 
 // Définition du chemin relatif
@@ -21,7 +22,7 @@ if (!fs.existsSync(OUTPUT_DIR)) {
 const CSV_COLUMNS = [
   "MTI","DE2","DE3","DE4","DE5","DE6","DE12","DE14","DE22","DE23","DE24","DE25","DE26",
   "DE30","DE31","DE33","DE37","DE38","DE40","DE41","DE42","DE48","DE49","DE50",
-  "DE63","DE71","DE73","DE93","DE94","DE95","DE100","PDS0023","PDS0052","PDS0122",
+  "DE63","DE71","DE73","DE93","DE94","DE95","DE100","DE105","PDS0023","PDS0052","PDS0122",
   "PDS0148","PDS0158","PDS0165","DE43_NAME","DE43_SUBURB","DE43_POSTCODE","ICC_DATA"
 ];
 
@@ -146,4 +147,52 @@ async function generateMultiCriteriaIPM(groups) {
   }
 }
 
-module.exports = { generateIPM, generateMultiCriteriaIPM };
+// 2. NOUVELLE API (Multi-critères Batch)
+async function generateMultiCriteriaIPM2(groups) {
+  const client = new Client({ user: process.env.DB_USER, host: process.env.DB_HOST, database: process.env.DB_NAME, password: process.env.DB_PASSWORD, port: process.env.DB_PORT });
+  await client.connect();
+  const allRows = [];
+  
+  try {
+    for (const group of groups) {
+    
+      for (const ref of group.references) {
+        const res = await client.query(
+          `SELECT * FROM approved_authorization WHERE reference_number = $1`, 
+          [ref]
+        );
+        
+        // On traite chaque ligne trouvée
+        res.rows.forEach(r => {
+          // ICI : On injecte le group.pan (celui de la requête) au lieu de r.card_number
+          allRows.push({
+              row: r,
+              panPourFichier: group.pan,
+              functionCode: group.functionCode,
+              transactionId: group.transactionId
+          });
+        });
+      }
+    }
+    if (allRows.length === 0) throw new Error("Aucune autorisation trouvée pour les références fournies.");
+
+    let de71Sequence = 1;
+    const nextDe71 = () => String(de71Sequence++).padStart(8, "0");
+    const totalAmount = allRows.reduce((sum, item) => sum + Math.round(Number(item.row.billing_amount || 0) * 100), 0);
+
+    const records = [
+      build1644("PRE", {}, nextDe71()),
+      ...allRows.map(item =>  build1240_ref(item.row, item.panPourFichier, nextDe71(), {
+        functionCode: item.functionCode,
+        transactionId: item.transactionId
+      })),
+      build1644("POST", { totalAmount: String(totalAmount).padStart(16, "0"), totalTransactions: allRows.length + 2 }, nextDe71())
+    ];
+
+    return await finalizeAndConvert(records);
+  } finally {
+    await client.end();
+  }
+}
+
+module.exports = { generateIPM, generateMultiCriteriaIPM, generateMultiCriteriaIPM2 };
