@@ -147,7 +147,6 @@ function build1240_ref(row, inputPan, de71, overrides = {}) {
     DE94: "00000002108",
     DE95: "",
     DE100: "",
-    DE105: "001" + generateTLID(),
     
     // Aplatissement des PDS
     PDS0023: "CT2",

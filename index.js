@@ -1,7 +1,7 @@
 // index.js
 require("dotenv").config();
 const express = require("express");
-const { generateIPM,generateMultiCriteriaIPM, generateMultiCriteriaIPM2 } = require("./ipmservice");
+const { generateIPM,generateMultiCriteriaIPM, generateMultiCriteriaIPM2 ,generateMultiCriteriaIPMMassive} = require("./ipmservice");
 
 const app = express();
 app.use(express.json()); // Pour intercepter le format JSON
@@ -80,6 +80,42 @@ app.post("/api/v2/clearing/generate-reference", async (req, res) => {
   }
 });
 
+
+app.post("/api/v3/clearing/generate-massive", async (req, res) => {
+
+  const { groups, numberOfTransactions = 2000000 } = req.body;
+
+  if (!groups || !Array.isArray(groups)) {
+    return res.status(400).json({
+      success: false,
+      error: "Le champ 'groups' doit être un tableau."
+    });
+  }
+
+  try {
+
+    console.log(`🚀 Génération de ${numberOfTransactions.toLocaleString()} transactions...`);
+
+    const fileName = await generateMultiCriteriaIPMMassive(
+      groups,
+      numberOfTransactions
+    );
+
+    res.json({
+      success: true,
+      file: fileName
+    });
+
+  } catch (e) {
+
+    res.status(500).json({
+      success: false,
+      error: e.message
+    });
+
+  }
+
+});
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✨ Service de génération IPM actif sur le port ${PORT}`);

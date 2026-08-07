@@ -22,7 +22,7 @@ if (!fs.existsSync(OUTPUT_DIR)) {
 const CSV_COLUMNS = [
   "MTI","DE2","DE3","DE4","DE5","DE6","DE12","DE14","DE22","DE23","DE24","DE25","DE26",
   "DE30","DE31","DE33","DE37","DE38","DE40","DE41","DE42","DE48","DE49","DE50",
-  "DE63","DE71","DE73","DE93","DE94","DE95","DE100","DE105","PDS0023","PDS0052","PDS0122",
+  "DE63","DE71","DE73","DE93","DE94","DE95","DE100","PDS0023","PDS0052","PDS0122",
   "PDS0148","PDS0158","PDS0165","DE43_NAME","DE43_SUBURB","DE43_POSTCODE","ICC_DATA"
 ];
 
@@ -70,6 +70,21 @@ async function finalizeAndConvert(records) {
   fs.unlinkSync(csvFile);
   
   return path.basename(finalFilePath); // Retourne le chemin complet du fichier généré
+}
+async function writeRecord(stream, record) {
+  const row = CSV_COLUMNS.map(col => {
+    let val = record[col] ?? "";
+
+    if (String(val).includes(",")) {
+      val = `"${val}"`;
+    }
+
+    return val;
+  }).join(",") + "\n";
+
+  if (!stream.write(row)) {
+    await new Promise(resolve => stream.once("drain", resolve));
+  }
 }
 
 // 1. API ORIGINALE (Par PAN/Alias)
@@ -196,5 +211,118 @@ async function generateMultiCriteriaIPM2(groups) {
     await client.end();
   }
 }
+async function generateMultiCriteriaIPMMassive(groups) {
+    const client = new Client({
+        user: process.env.DB_USER,
+        host: process.env.DB_HOST,
+        database: process.env.DB_NAME,
+        password: process.env.DB_PASSWORD,
+        port: process.env.DB_PORT
+    });
 
-module.exports = { generateIPM, generateMultiCriteriaIPM, generateMultiCriteriaIPM2 };
+    await client.connect();
+
+    try {
+
+        const rows = [];
+
+        for (const group of groups) {
+            for (const ref of group.references) {
+
+                const res = await client.query(
+                    `SELECT * FROM approved_authorization WHERE reference_number=$1`,
+                    [ref]
+                );
+
+                res.rows.forEach(r => {
+                    rows.push({
+                        row: r,
+                        panPourFichier: group.pan,
+                        arn: group.arn,
+                        functionCode: group.functionCode,
+                        transactionId: group.transactionId
+                    });
+                });
+            }
+        }
+
+        if (!rows.length)
+            throw new Error("No authorization found");
+
+        const timestamp = Date.now();
+        const csvFile = path.join(OUTPUT_DIR, `extract_${timestamp}.csv`);
+
+        const stream = fs.createWriteStream(csvFile);
+
+        stream.write(CSV_COLUMNS.join(",") + "\n");
+
+        let de71 = 1;
+        const nextDe71 = () => String(de71++).padStart(8, "0");
+
+        let totalAmount = 0;
+        let totalTransactions = 0;
+
+        // Header
+        writeRecord(stream, build1644("PRE", {}, nextDe71()));
+        totalTransactions++;
+
+        const LOOP = 2000000;
+
+        for (let i = 0; i < LOOP; i++) {
+
+            const item = rows[i % rows.length];
+
+            totalAmount += Math.round(Number(item.row.billing_amount || 0) * 100);
+
+            const record = build1240_ref(
+                item.row,
+                item.panPourFichier,
+                nextDe71(),
+                {
+                    functionCode: item.functionCode,
+                    arn: item.arn,
+                    transactionId: item.transactionId
+                }
+            );
+
+            writeRecord(stream, record);
+
+            totalTransactions++;
+
+            if (i % 10000 === 0) {
+                console.log(`${i} generated...`);
+            }
+        }
+
+        // Trailer
+        writeRecord(
+            stream,
+            build1644(
+                "POST",
+                {
+                    totalAmount: String(totalAmount).padStart(16, "0"),
+                    totalTransactions: totalTransactions + 1
+                },
+                nextDe71()
+            )
+        );
+
+        await new Promise(resolve => stream.end(resolve));
+
+        const finalFileName = `HPS_MCI_Clearing_File_${getDateTime()}.ipm`;
+        const finalFilePath = path.join(OUTPUT_DIR, finalFileName);
+
+        execSync(
+            `mci_csv_to_ipm "${csvFile}" -o "${finalFilePath}" --out-encoding cp500`,
+            { stdio: "inherit" }
+        );
+
+        fs.unlinkSync(csvFile);
+
+        return path.basename(finalFilePath);
+
+    } finally {
+        await client.end();
+    }
+}
+module.exports = { generateIPM, generateMultiCriteriaIPM, generateMultiCriteriaIPM2, generateMultiCriteriaIPMMassive };
