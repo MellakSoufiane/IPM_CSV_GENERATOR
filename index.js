@@ -1,7 +1,7 @@
 // index.js
 require("dotenv").config();
 const express = require("express");
-const { generateIPM,generateMultiCriteriaIPM, generateMultiClearingIPM, generateMultiCriteriaIPM2 ,generateMultiCriteriaIPMMassive} = require("./ipmservice");
+const { generateIPM,generateMultiCriteriaIPM, generateMultiClearingIPM, generateMultiCriteriaIPM2 ,generateMultiCriteriaIPMMassive, generateChargebackIPM, generateSecondPresentmentIPM, generateFeeIPM, generateAddendumIPM } = require("./ipmservice");
 
 const app = express();
 app.use(express.json()); // Pour intercepter le format JSON
@@ -138,6 +138,71 @@ app.post("/api/v3/clearing/generate-massive", async (req, res) => {
   }
 
 });
+// ==========================================
+// Chargeback (1442) — Body: [{ pan, references:[...], functionCode?, messageReasonCode? }]
+// ==========================================
+app.post("/api/v1/clearing/generate-chargeback", async (req, res) => {
+  const groups = req.body;
+  if (!groups || !Array.isArray(groups)) {
+    return res.status(400).json({ success: false, error: "Format invalide : attend un tableau d'objets." });
+  }
+  try {
+    const file = await generateChargebackIPM(groups);
+    return res.status(200).json({ success: true, file });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ==========================================
+// Second Presentment (1240-205/282) — Body: [{ pan, references:[...], functionCode? }]
+// ==========================================
+app.post("/api/v1/clearing/generate-second-presentment", async (req, res) => {
+  const groups = req.body;
+  if (!groups || !Array.isArray(groups)) {
+    return res.status(400).json({ success: false, error: "Format invalide : attend un tableau d'objets." });
+  }
+  try {
+    const file = await generateSecondPresentmentIPM(groups);
+    return res.status(200).json({ success: true, file });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ==========================================
+// Fee Collection (1740) — scaffold (needs mci_csv_to_ipm DE28 columns)
+// ==========================================
+app.post("/api/v1/clearing/generate-fee", async (req, res) => {
+  const groups = req.body;
+  if (!groups || !Array.isArray(groups)) {
+    return res.status(400).json({ success: false, error: "Format invalide : attend un tableau d'objets." });
+  }
+  try {
+    const file = await generateFeeIPM(groups);
+    return res.status(200).json({ success: true, file });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ==========================================
+// Financial Detail Addendum (1644-696) — scaffold. ?kind=lodging|passenger
+// ==========================================
+app.post("/api/v1/clearing/generate-addendum", async (req, res) => {
+  const groups = req.body;
+  const kind = req.query.kind || "generic";
+  if (!groups || !Array.isArray(groups)) {
+    return res.status(400).json({ success: false, error: "Format invalide : attend un tableau d'objets." });
+  }
+  try {
+    const file = await generateAddendumIPM(groups, kind);
+    return res.status(200).json({ success: true, file });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✨ Service de génération IPM actif sur le port ${PORT}`);
