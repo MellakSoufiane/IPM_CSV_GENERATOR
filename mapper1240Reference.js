@@ -109,7 +109,9 @@ function build1240_ref(row, inputPan, de71, overrides = {}) {
   de48FullString += buildPDSString("0189", "2TL011 2345556789 MN087 Creditville  NZL");
 
   return {
-    MTI: "1240",
+    // MTI defaults to 1240 (presentment). Pass overrides.mti = "1442" for
+    // chargeback (First Chargeback FC 450/453, Second/Arbitration 451/454).
+    MTI: overrides.mti || "1240",
     DE2: inputPan || "5367635001039824",
     DE3: (row.processing_code || "000000").toString().padEnd(6, "0"),
     DE4: formatAmount(row.transaction_amount),
@@ -119,8 +121,13 @@ function build1240_ref(row, inputPan, de71, overrides = {}) {
     DE14: formatDateToYYMM(row.end_expiry_date), // YYMM formaté
     DE22: (row.pos_data || "000000000000").slice(0, 12),
     DE23: "001",
+    // DE24 Function Code: 200 First Presentment (default), 205 Second Presentment
+    // (Full), 282 Second Presentment (Partial), 450/453 First Chargeback,
+    // 451/454 Arbitration Chargeback.
     DE24: overrides.functionCode || "200",
-    DE25: "1401",
+    // DE25 Message Reason Code: pass overrides.messageReasonCode for chargebacks
+    // (e.g. 4837, 4853, 4863, 4870, 4871). Default 1401 for presentments.
+    DE25: overrides.messageReasonCode || "1401",
     DE26: row.card_acceptor_activity || "5542",
     DE30: "000000010000000000000000",
     DE31: (overrides.arn||`0230120${yearDigit}${dayOfYear}${seq}${chk}`), // Concaténation des sous-éléments
