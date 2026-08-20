@@ -1,7 +1,7 @@
 // index.js
 require("dotenv").config();
 const express = require("express");
-const { generateIPM,generateMultiCriteriaIPM, generateMultiCriteriaIPM2 ,generateMultiCriteriaIPMMassive} = require("./ipmservice");
+const { generateIPM,generateMultiCriteriaIPM, generateMultiClearingIPM, generateMultiCriteriaIPM2 ,generateMultiCriteriaIPMMassive} = require("./ipmservice");
 
 const app = express();
 app.use(express.json()); // Pour intercepter le format JSON
@@ -80,6 +80,28 @@ app.post("/api/v2/clearing/generate-reference", async (req, res) => {
   }
 });
 
+
+// ==========================================
+// MULTI-CLEARING (partial clearing): split each authorization's
+// amount across N (default 2) separate IPM files. Returns files:[...]
+// Body: [{ pan, references:[...] }]  (optional top-level ?parts=2)
+// ==========================================
+app.post("/api/v1/clearing/generate-multiclearing", async (req, res) => {
+  const groups = req.body;
+  const parts = parseInt(req.query.parts, 10) || 2;
+
+  if (!groups || !Array.isArray(groups)) {
+    return res.status(400).json({ success: false, error: "Format invalide : attend un tableau d'objets." });
+  }
+
+  try {
+    console.log(`🚀 Multi-clearing: ${groups.length} groupe(s), ${parts} fichiers...`);
+    const files = await generateMultiClearingIPM(groups, parts);
+    return res.status(200).json({ success: true, files });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
 
 app.post("/api/v3/clearing/generate-massive", async (req, res) => {
 
