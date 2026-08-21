@@ -478,8 +478,83 @@ async function generateSecondPresentmentIPM(groups) {
 async function generateFeeIPM(/* groups */) {
   throw new Error("Fee Collection/1740 generation not yet mapped to mci_csv_to_ipm (needs DE28 fee columns).");
 }
-async function generateAddendumIPM(/* groups, kind */) {
-  throw new Error("Financial Detail Addendum/1644-696 not yet mapped to mci_csv_to_ipm (needs Passenger Transport / Lodging PDS columns).");
+// Concatenate one PDS in DE48 format: Tag(4) + Length(3) + Value.
+function _pds(tag, value) {
+  const v = String(value ?? "");
+  return `${tag}${String(v.length).padStart(3, "0")}${v}`;
+}
+
+// Financial Detail Addendum/1644-696 record. Carries the industry data as PDS in
+// DE48. PDS0501 (Transaction Description) identifies the addendum: 16 chars =
+// UsageCode(2) + IndustryRecordNumber(3) + OccurrenceIndicator(3) +
+// AssociatedFirstPresentmentNumber(8, = the linked 1240's DE71).
+//   kind "passenger" -> Usage 01 (Passenger Transport, General Ticket)
+//   kind "lodging"   -> Usage 06 (Lodging Summary)
+function build1644Addendum(row, kind, assocDe71, de71) {
+  const usage = kind === "lodging" ? "06" : "01";
+  const pds0501 = usage + "000" + "001" + String(assocDe71).padStart(8, "0"); // 16 chars
+  let de48 = _pds("0501", pds0501);
+  if (kind === "lodging") {
+    de48 += _pds("0574", "260615");        // Arrival Date (YYMMDD)
+    de48 += _pds("0575", "260617");        // Departure Date
+    de48 += _pds("0576", "FOLIO000001");   // Folio Number
+    de48 += _pds("0512", "000000015000");  // Total (room) amount
+  } else {
+    de48 += _pds("0505", "PASSENGER/TEST"); // Passenger Name
+    de48 += _pds("0507", "AA");             // Issuing Carrier
+    de48 += _pds("0521", "AA");             // Carrier Code (IATA)
+    de48 += _pds("0522", "Y");              // Service Class
+    de48 += _pds("0523", "JFK");            // City of Origin / Airport Code
+    de48 += _pds("0524", "LAX");            // City of Destination / Airport Code
+    de48 += _pds("0530", "1234");           // Flight Number
+    de48 += _pds("0520", "260615");         // Travel Date (YYMMDD)
+  }
+  return {
+    MTI: "1644",
+    DE24: "696",
+    DE33: row.acquirer_institution_code || "002108",
+    DE48: de48,
+    DE71: de71,
+    DE94: "00000002108",
+    DE100: "",
+  };
+}
+
+// Generate a First Presentment/1240 with an immediately-following Financial Detail
+// Addendum/1644-696 for each authorization (looked up by RRN). kind: passenger|lodging.
+async function generateAddendumIPM(groups, kind = "passenger") {
+  const client = new Client({ user: process.env.DB_USER, host: process.env.DB_HOST, database: process.env.DB_NAME, password: process.env.DB_PASSWORD, port: process.env.DB_PORT });
+  await client.connect();
+  const allRows = [];
+  try {
+    for (const group of groups) {
+      for (const ref of group.references) {
+        const res = await client.query(
+          `SELECT * FROM approved_authorization WHERE reference_number = $1`, [ref]
+        );
+        res.rows.forEach(r => allRows.push({ row: r, pan: group.pan }));
+      }
+    }
+    if (allRows.length === 0) throw new Error("Aucune autorisation trouvée pour les références fournies.");
+
+    let seq = 1;
+    const next = () => String(seq++).padStart(8, "0");
+    let totalMinor = 0;
+    const records = [build1644("PRE", {}, next())];
+    for (const item of allRows) {
+      const presentmentDe71 = next();
+      records.push(build1240_ref(item.row, item.pan, presentmentDe71, {}));
+      totalMinor += Math.round(Number(item.row.billing_amount || 0) * 100);
+      // Addendum must immediately follow its associated First Presentment/1240.
+      records.push(build1644Addendum(item.row, kind, presentmentDe71, next()));
+    }
+    const totalTransactions = allRows.length * 2 + 2; // header + N×(1240+1644) + trailer
+    records.push(build1644("POST", { totalAmount: String(totalMinor).padStart(16, "0"), totalTransactions }, next()));
+
+    return await finalizeAndConvert(records);
+  } finally {
+    await client.end();
+  }
 }
 
 module.exports = { generateIPM, generateMultiCriteriaIPM, generateMultiClearingIPM, generateMultiCriteriaIPM2, generateMultiCriteriaIPMMassive, generateChargebackIPM, generateSecondPresentmentIPM, generateFeeIPM, generateAddendumIPM };
