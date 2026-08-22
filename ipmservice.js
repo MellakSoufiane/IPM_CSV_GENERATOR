@@ -7,7 +7,7 @@ const path = require("path");
 const { execSync } = require("child_process");
 
 const { build1240 } = require("./mapper1240");
-const { build1240_ref } = require("./mapper1240Reference");
+const { build1240_ref, build1740Fee } = require("./mapper1240Reference");
 const { build1644 } = require("./mapper1644");
 
 // Définition du chemin relatif
@@ -475,8 +475,47 @@ async function generateSecondPresentmentIPM(groups) {
 // These need extra CSV columns understood by mci_csv_to_ipm on the Windows host
 // (DE28 fee amount for 1740; Passenger Transport / Lodging Summary PDS for the
 // 1644-696 addendum). Wire the mapper columns there, then replace these throws.
-async function generateFeeIPM(/* groups */) {
-  throw new Error("Fee Collection/1740 generation not yet mapped to mci_csv_to_ipm (needs DE28 fee columns).");
+// Generate a Fee Collection/1740 file: one fee message per authorization (by RRN).
+// Per group you may set feeAmount (major units), functionCode (700/780/781/782),
+// messageReasonCode (7614, 7622-7627, …) and processingCode. Defaults: a $5.00
+// Retrieval Fee Billing (DE3=190000, DE24=700, DE25=7614).
+async function generateFeeIPM(groups) {
+  const client = new Client({ user: process.env.DB_USER, host: process.env.DB_HOST, database: process.env.DB_NAME, password: process.env.DB_PASSWORD, port: process.env.DB_PORT });
+  await client.connect();
+  const allRows = [];
+  try {
+    for (const group of groups) {
+      for (const ref of group.references) {
+        const res = await client.query(
+          `SELECT * FROM approved_authorization WHERE reference_number = $1`, [ref]
+        );
+        res.rows.forEach(r => allRows.push({
+          row: r, pan: group.pan,
+          opts: {
+            feeAmount: group.feeAmount != null ? Number(group.feeAmount) : 5.0,
+            functionCode: group.functionCode || "700",
+            messageReasonCode: group.messageReasonCode || "7614",
+            processingCode: group.processingCode || "190000",
+          },
+        }));
+      }
+    }
+    if (allRows.length === 0) throw new Error("Aucune autorisation trouvée pour les références fournies.");
+
+    let seq = 1;
+    const next = () => String(seq++).padStart(8, "0");
+    let totalMinor = 0;
+    const records = [build1644("PRE", {}, next())];
+    for (const item of allRows) {
+      records.push(build1740Fee(item.row, item.pan, next(), item.opts));
+      totalMinor += Math.round((item.opts.feeAmount || 0) * 100);
+    }
+    records.push(build1644("POST", { totalAmount: String(totalMinor).padStart(16, "0"), totalTransactions: allRows.length + 2 }, next()));
+
+    return await finalizeAndConvert(records);
+  } finally {
+    await client.end();
+  }
 }
 // Concatenate one PDS in DE48 format: Tag(4) + Length(3) + Value.
 function _pds(tag, value) {

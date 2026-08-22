@@ -168,4 +168,46 @@ function build1240_ref(row, inputPan, de71, overrides = {}) {
   };
 }
 
-module.exports = { build1240_ref };
+// Fee Collection/1740 record. A standalone financial message (no DE22/DE55 ICC
+// data). Defaults model a Retrieval Fee Billing fee: DE3=190000, DE24=700,
+// DE25=7614. Override via opts: { feeAmount, processingCode, functionCode,
+// messageReasonCode, arn }.
+function build1740Fee(row, inputPan, de71, opts = {}) {
+  const now = new Date();
+  const yearDigit = String(now.getFullYear()).slice(-1);
+  const startOfYear = new Date(now.getFullYear(), 0, 0);
+  const dayOfYear = String(Math.floor((now - startOfYear) / 86400000)).padStart(3, "0");
+  const seq = String(acquirerSequenceNumber++);
+  const chk = String(Math.floor(Math.random() * 10));
+  const feeAmount = opts.feeAmount != null ? opts.feeAmount : 5.0;
+  const yymmdd = `${String(now.getFullYear()).slice(-2)}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}`;
+
+  return {
+    MTI: "1740",
+    DE2: inputPan || row.card_number || "5367635001039824",
+    DE3: (opts.processingCode || "190000").toString().padEnd(6, "0"),
+    DE4: formatAmount(feeAmount),
+    DE5: formatAmount(feeAmount),
+    DE12: formatDatetime(row.transaction_local_date),
+    DE24: opts.functionCode || "700",                 // Fee Collection (Customer-generated)
+    DE25: opts.messageReasonCode || "7614",           // Retrieval Fee Billing reason
+    DE30: "000000010000000000000000",                 // Amounts, Original
+    DE31: (opts.arn || `0230120${yearDigit}${dayOfYear}${seq}${chk}`),
+    DE33: row.acquirer_institution_code || "002108",
+    DE37: row.reference_number || "000000000000",
+    DE38: row.authorization_code || "030160",
+    DE43_NAME: "BP CONNECT RIVERSIDE",
+    DE43_SUBURB: "WHANGAREI",
+    DE43_POSTCODE: "0112",
+    DE48: buildPDSString("0158", "DMC       75"),      // Additional Data (mandatory)
+    DE49: row.transaction_currency || "036",
+    DE50: "036",
+    DE71: de71,
+    DE73: yymmdd,                                      // Date, Action (YYMMDD)
+    DE93: "035083",
+    DE94: "00000002108",
+    PDS0158: "DMC       75",
+  };
+}
+
+module.exports = { build1240_ref, build1740Fee };
