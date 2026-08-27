@@ -2,6 +2,7 @@
 require("dotenv").config();
 const express = require("express");
 const { generateIPM,generateMultiCriteriaIPM, generateMultiClearingIPM, generateMultiCriteriaIPM2 ,generateMultiCriteriaIPMMassive, generateChargebackIPM, generateSecondPresentmentIPM, generateFeeIPM, generateAddendumIPM } = require("./ipmservice");
+const { log, logError } = require("./logger");
 
 const app = express();
 app.use(express.json()); // Pour intercepter le format JSON
@@ -11,29 +12,38 @@ app.use(express.json()); // Pour intercepter le format JSON
 // ==========================================
 app.post("/api/v1/clearing/generate", async (req, res) => {
   const { pan, aliasPan } = req.body;
+  const requestStartedAt = Date.now();
+  const maskedPan = pan ? pan.replace(/.(?=.{4})/g, "*") : pan;
+
+  log(`➡️  [REQUEST] POST /api/v1/clearing/generate | pan=${maskedPan} | aliasPan=${aliasPan}`);
 
   // Validation basique des entrées
   if (!pan || !aliasPan) {
-    return res.status(400).json({ 
-      success: false, 
-      error: "Paramètres 'pan' et 'aliasPan' requis dans le corps de la requête." 
+    log(`⬅️  [RESPONSE] POST /api/v1/clearing/generate | status=400 | error=missing_params`);
+    return res.status(400).json({
+      success: false,
+      error: "Paramètres 'pan' et 'aliasPan' requis dans le corps de la requête."
     });
   }
 
   try {
-    console.log(`🚀 Requête reçue pour le PAN: ${pan.replace(/.(?=.{4})/g, "*")}`);
+    console.log(`🚀 Requête reçue pour le PAN: ${maskedPan}`);
     const fileName = await generateIPM(pan, aliasPan);
-    
+    const durationMs = Date.now() - requestStartedAt;
+
+    log(`⬅️  [RESPONSE] POST /api/v1/clearing/generate | status=200 | duration=${durationMs}ms | file=${fileName}`);
     return res.status(200).json({
       success: true,
       message: "Fichier de clearing IPM généré avec succès.",
       file: fileName
     });
   } catch (error) {
-    console.error("❌ Erreur service:", error.message);
-    return res.status(500).json({ 
-      success: false, 
-      error: error.message 
+    const durationMs = Date.now() - requestStartedAt;
+    logError("❌ Erreur service:", error.message);
+    log(`⬅️  [RESPONSE] POST /api/v1/clearing/generate | status=500 | duration=${durationMs}ms | error=${error.message}`);
+    return res.status(500).json({
+      success: false,
+      error: error.message
     });
   }
 });

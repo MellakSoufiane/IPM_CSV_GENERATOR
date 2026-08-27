@@ -9,6 +9,21 @@ const { execSync } = require("child_process");
 const { build1240 } = require("./mapper1240");
 const { build1240_ref, build1740Fee } = require("./mapper1240Reference");
 const { build1644 } = require("./mapper1644");
+const { log, logError, logDbQuery, logTask } = require("./logger");
+
+// Wraps client.query so every DB call logs its request (SQL + params) and
+// its response (row count + duration), or the error if it fails.
+async function loggedQuery(client, label, sql, params) {
+  const logResult = logDbQuery(label, sql, params);
+  try {
+    const result = await client.query(sql, params);
+    logResult(result);
+    return result;
+  } catch (error) {
+    logResult(null, error);
+    throw error;
+  }
+}
 
 // Définition du chemin relatif
 const OUTPUT_DIR = path.join(__dirname, "output");
@@ -39,6 +54,8 @@ function getDateTime() {
 
 // Fonction utilitaire pour traiter le fichier et appeler cardutil
 async function finalizeAndConvert(records) {
+  logTask("finalizeAndConvert:start", { recordCount: records.length });
+
   // Créer le dossier output s'il n'existe pas
   if (!fs.existsSync(OUTPUT_DIR)) {
     fs.mkdirSync(OUTPUT_DIR, { recursive: true });
@@ -57,18 +74,22 @@ async function finalizeAndConvert(records) {
   const timestamp = Date.now();
   const csvFile = path.join(OUTPUT_DIR, `extract_${timestamp}.csv`); // CSV dans le dossier output
   fs.writeFileSync(csvFile, csvContent);
-  console.log(`Fichier CSV généré : ${csvFile}`);
+  log(`Fichier CSV généré : ${csvFile}`);
+  logTask("finalizeAndConvert:csv-written", { csvFile });
 
   const finalFileName = `HPS_MCI_Clearing_File_${getDateTime()}.ipm`;
   const finalFilePath = path.join(OUTPUT_DIR, finalFileName);
 
-  console.log("Conversion du CSV vers IPM via cardutil...");
+  log("Conversion du CSV vers IPM via cardutil...");
+  const conversionStartedAt = Date.now();
   // On passe les chemins complets à la commande
   execSync(`mci_csv_to_ipm "${csvFile}" -o "${finalFilePath}" --out-encoding cp500`, { stdio: "inherit" });
-  
+  logTask("finalizeAndConvert:cardutil-done", { durationMs: Date.now() - conversionStartedAt, finalFilePath });
+
   // Nettoyage du fichier CSV intermédiaire
   fs.unlinkSync(csvFile);
-  
+
+  logTask("finalizeAndConvert:end", { file: path.basename(finalFilePath) });
   return path.basename(finalFilePath); // Retourne le chemin complet du fichier généré
 }
 async function writeRecord(stream, record) {
@@ -90,20 +111,37 @@ async function writeRecord(stream, record) {
 // 1. API ORIGINALE (Par PAN/Alias)
 async function generateIPM(pan, aliaspan) {
   if (!aliaspan || !pan) throw new Error("alias_pan and pan are required");
+  const maskedPan = pan.replace(/.(?=.{4})/g, "*");
+  logTask("generateIPM:start", { pan: maskedPan, aliasPan: aliaspan });
+
   const client = new Client({ user: process.env.DB_USER, host: process.env.DB_HOST, database: process.env.DB_NAME, password: process.env.DB_PASSWORD, port: process.env.DB_PORT });
+
+  logTask("generateIPM:db-connect", { host: process.env.DB_HOST, database: process.env.DB_NAME });
   await client.connect();
+  log("🗄️  [DB] Connexion établie");
 
   try {
-    const cardRes = await client.query(`SELECT card_number FROM card WHERE alias_pan = $1`, [aliaspan]);
+    const cardRes = await loggedQuery(
+      client,
+      "generateIPM:lookup-card-by-alias",
+      `SELECT card_number FROM card WHERE alias_pan = $1`,
+      [aliaspan]
+    );
     if (cardRes.rows.length === 0) throw new Error("No card found");
     const tokenpan = cardRes.rows[0].card_number;
 
-    const res = await client.query(`SELECT * FROM approved_authorization WHERE card_number = $1`, [tokenpan]);
+    const res = await loggedQuery(
+      client,
+      "generateIPM:lookup-approved-authorization",
+      `SELECT * FROM approved_authorization WHERE card_number = $1`,
+      [tokenpan]
+    );
     if (!res.rows.length) throw new Error("No authorization found");
 
     const totalTransactions = res.rows.length + 2;
     const totalAmount = res.rows.reduce((sum, row) => sum + Math.round(Number(row.billing_amount || 0) * 100), 0);
-    
+    logTask("generateIPM:records-summary", { authorizationsFound: res.rows.length, totalTransactions, totalAmount });
+
     let de71Sequence = 1;
     const nextDe71 = () => String(de71Sequence++).padStart(8, "0");
 
@@ -113,9 +151,15 @@ async function generateIPM(pan, aliaspan) {
       build1644("POST", { totalAmount: String(totalAmount).padStart(16, "0"), totalTransactions }, nextDe71())
     ];
 
-    return await finalizeAndConvert(records);
+    const fileName = await finalizeAndConvert(records);
+    logTask("generateIPM:end", { file: fileName });
+    return fileName;
+  } catch (error) {
+    logError(`❌ [generateIPM] Erreur: ${error.message}`);
+    throw error;
   } finally {
     await client.end();
+    log("🗄️  [DB] Connexion fermée");
   }
 }
 
