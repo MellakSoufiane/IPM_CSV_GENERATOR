@@ -53,18 +53,27 @@ app.post("/api/v1/clearing/generate", async (req, res) => {
 // ==========================================
 app.post("/api/v1/clearing/generate-reference", async (req, res) => {
   // On s'attend directement à un tableau d'objets comme vous l'avez défini
-  const groups = req.body; 
+  const groups = req.body;
+  const requestStartedAt = Date.now();
+  const totalReferences = Array.isArray(groups) ? groups.reduce((n, g) => n + (g && g.references ? g.references.length : 0), 0) : 0;
+
+  log(`➡️  [REQUEST] POST /api/v1/clearing/generate-reference | groups=${Array.isArray(groups) ? groups.length : "?"} | totalReferences=${totalReferences}`);
 
   if (!groups || !Array.isArray(groups)) {
+    log(`⬅️  [RESPONSE] POST /api/v1/clearing/generate-reference | status=400 | error=invalid_format`);
     return res.status(400).json({ success: false, error: "Format invalide : attend un tableau d'objets." });
   }
 
   try {
-    console.log(`🚀 Traitement de ${groups.length} groupes de transactions...`);
     const fileName = await generateMultiCriteriaIPM(groups);
-    
+    const durationMs = Date.now() - requestStartedAt;
+
+    log(`⬅️  [RESPONSE] POST /api/v1/clearing/generate-reference | status=200 | duration=${durationMs}ms | file=${fileName}`);
     return res.status(200).json({ success: true, file: fileName });
   } catch (error) {
+    const durationMs = Date.now() - requestStartedAt;
+    logError("❌ Erreur service:", error.message);
+    log(`⬅️  [RESPONSE] POST /api/v1/clearing/generate-reference | status=500 | duration=${durationMs}ms | error=${error.message}`);
     return res.status(500).json({ success: false, error: error.message });
   }
 });

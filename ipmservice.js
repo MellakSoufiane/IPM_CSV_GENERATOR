@@ -165,26 +165,46 @@ async function generateIPM(pan, aliaspan) {
 
 // 2. NOUVELLE API (Multi-critères Batch)
 async function generateMultiCriteriaIPM(groups) {
+  const startedAt = Date.now();
+  const totalReferences = groups.reduce((n, g) => n + (g.references ? g.references.length : 0), 0);
+  logTask("generateMultiCriteriaIPM:start", { groups: groups.length, totalReferences });
+
   const client = new Client({ user: process.env.DB_USER, host: process.env.DB_HOST, database: process.env.DB_NAME, password: process.env.DB_PASSWORD, port: process.env.DB_PORT });
   await client.connect();
+  log("🗄️  [DB] Connexion établie");
+
   const allRows = [];
-  
+
   try {
-    for (const group of groups) {
-    
-      for (const ref of group.references) {
-        const res = await client.query(
-          `SELECT * FROM approved_authorization WHERE reference_number = $1`, 
-          [ref]
-        );
-        
-        // On traite chaque ligne trouvée
-        res.rows.forEach(r => {
-          // ICI : On injecte le group.pan (celui de la requête) au lieu de r.card_number
-          allRows.push({ 
-            row: r, 
-            panPourFichier: group.pan 
-          });
+    for (let i = 0; i < groups.length; i++) {
+      const group = groups[i];
+      const refs = group.references || [];
+      if (refs.length === 0) continue;
+
+      // Un seul aller-retour DB par groupe (au lieu d'un par référence) :
+      // reference_number = ANY($1) remplace la boucle "await client.query" par référence.
+      const res = await loggedQuery(
+        client,
+        `generateMultiCriteriaIPM:group-${i + 1}/${groups.length} (${refs.length} refs)`,
+        `SELECT * FROM approved_authorization WHERE reference_number = ANY($1::text[])`,
+        [refs]
+      );
+
+      // On traite chaque ligne trouvée
+      res.rows.forEach(r => {
+        // ICI : On injecte le group.pan (celui de la requête) au lieu de r.card_number
+        allRows.push({
+          row: r,
+          panPourFichier: group.pan
+        });
+      });
+
+      if ((i + 1) % 25 === 0 || i === groups.length - 1) {
+        logTask("generateMultiCriteriaIPM:progress", {
+          groupsDone: i + 1,
+          groupsTotal: groups.length,
+          rowsMatchedSoFar: allRows.length,
+          elapsedMs: Date.now() - startedAt
         });
       }
     }
@@ -193,6 +213,7 @@ async function generateMultiCriteriaIPM(groups) {
     let de71Sequence = 1;
     const nextDe71 = () => String(de71Sequence++).padStart(8, "0");
     const totalAmount = allRows.reduce((sum, item) => sum + Math.round(Number(item.row.billing_amount || 0) * 100), 0);
+    logTask("generateMultiCriteriaIPM:records-summary", { rowsMatched: allRows.length, totalAmount });
 
     const records = [
       build1644("PRE", {}, nextDe71()),
@@ -200,9 +221,15 @@ async function generateMultiCriteriaIPM(groups) {
       build1644("POST", { totalAmount: String(totalAmount).padStart(16, "0"), totalTransactions: allRows.length + 2 }, nextDe71())
     ];
 
-    return await finalizeAndConvert(records);
+    const fileName = await finalizeAndConvert(records);
+    logTask("generateMultiCriteriaIPM:end", { file: fileName, totalDurationMs: Date.now() - startedAt });
+    return fileName;
+  } catch (error) {
+    logError(`❌ [generateMultiCriteriaIPM] Erreur: ${error.message}`);
+    throw error;
   } finally {
     await client.end();
+    log("🗄️  [DB] Connexion fermée");
   }
 }
 
