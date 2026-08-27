@@ -5,7 +5,7 @@ const { generateIPM,generateMultiCriteriaIPM, generateMultiClearingIPM, generate
 const { log, logError } = require("./logger");
 
 const app = express();
-app.use(express.json()); // Pour intercepter le format JSON
+app.use(express.json({ limit: "50mb" })); // Pour intercepter le format JSON (jusqu'à 50 Mo)
 
 // ==========================================
 // ENDPOINT (Isolé - CARD ALIAS PAN Criteria)
