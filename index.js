@@ -190,16 +190,61 @@ app.post("/api/v1/clearing/generate-second-presentment", async (req, res) => {
 });
 
 // ==========================================
-// Fee Collection (1740) — scaffold (needs mci_csv_to_ipm DE28 columns)
+// Fee Collection (1740) — batch generator accepting feeCount / count
 // ==========================================
 app.post("/api/v1/clearing/generate-fee", async (req, res) => {
-  const groups = req.body;
-  if (!groups || !Array.isArray(groups)) {
-    return res.status(400).json({ success: false, error: "Format invalide : attend un tableau d'objets." });
+  const body = req.body || {};
+  const isLegacyGroups = Array.isArray(body);
+  const count = Number(body.count ?? body.feeCount ?? body.numberOfFees ?? (isLegacyGroups ? undefined : req.query.count ?? req.query.feeCount ?? req.query.numberOfFees));
+
+  if (isLegacyGroups) {
+    try {
+      const file = await generateFeeIPM(body);
+      return res.status(200).json({ success: true, file });
+    } catch (error) {
+      return res.status(500).json({ success: false, error: error.message });
+    }
   }
+
+  if (!Number.isInteger(count) || count <= 0) {
+    return res.status(400).json({
+      success: false,
+      error: "Le champ 'count' (ou 'feeCount') est requis et doit être un entier positif."
+    });
+  }
+
   try {
-    const file = await generateFeeIPM(groups);
-    return res.status(200).json({ success: true, file });
+    const file = await generateFeeIPM({
+      count,
+      feeAmount: body.feeAmount ?? body.amount ?? 11.26,
+      startingDe71: body.startingDe71 ?? body.startingMessageNumber ?? body.startMessageNumber ?? 282034,
+      pan: body.pan || "",
+    });
+    return res.status(200).json({ success: true, file, recordsGenerated: count });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/api/v1/clearing/generate-fees", async (req, res) => {
+  const body = req.body || {};
+  const count = Number(body.count ?? body.feeCount ?? body.numberOfFees ?? req.query.count ?? req.query.feeCount ?? req.query.numberOfFees);
+
+  if (!Number.isInteger(count) || count <= 0) {
+    return res.status(400).json({
+      success: false,
+      error: "Le champ 'count' (ou 'feeCount') est requis et doit être un entier positif."
+    });
+  }
+
+  try {
+    const file = await generateFeeIPM({
+      count,
+      feeAmount: body.feeAmount ?? body.amount ?? 11.26,
+      startingDe71: body.startingDe71 ?? body.startingMessageNumber ?? body.startMessageNumber ?? 282034,
+      pan: body.pan || "",
+    });
+    return res.status(200).json({ success: true, file, recordsGenerated: count });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
   }
