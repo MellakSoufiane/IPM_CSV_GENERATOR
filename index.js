@@ -1,11 +1,31 @@
 // index.js
 require("dotenv").config();
 const express = require("express");
-const { generateIPM,generateMultiCriteriaIPM, generateMultiClearingIPM, generateMultiCriteriaIPM2 ,generateMultiCriteriaIPMMassive, generateChargebackIPM, generateSecondPresentmentIPM, generateFeeIPM, generateAddendumIPM } = require("./ipmservice");
+const { generateIPM,generateMultiCriteriaIPM, generateMultiClearingIPM, generateMultiCriteriaIPM2 ,generateMultiCriteriaIPMMassive, generateChargebackIPM, generateSecondPresentmentIPM, generateFeeIPM, generateAddendumIPM, generateMixedMtiIPM ,OUTPUT_DIR} = require("./ipmservice");
 const { log, logError } = require("./logger");
+const fs = require("fs");
+const path = require("path");
+const { DEFAULTS: TQR4_DEFAULTS, VALID_KEYS: TQR4_KEYS, buildRecord: buildTqr4Record } = require("./record");
+
+
+
 
 const app = express();
-app.use(express.json({ limit: "50mb" })); // Pour intercepter le format JSON (jusqu'à 50 Mo)
+app.use(express.json({ limit: "1024mb" })); // Pour intercepter le format JSON (jusqu'à 50 Mo)
+
+
+// Returns e.g. Hps_clearing_TQR4_20260924153045.ipm
+function tqr4FileName(date = new Date()) {
+  const p = (n) => String(n).padStart(2, "0");
+  const stamp =
+    date.getFullYear() +
+    p(date.getMonth() + 1) +
+    p(date.getDate()) +
+    p(date.getHours()) +
+    p(date.getMinutes()) +
+    p(date.getSeconds());
+  return `Hps_clearing_TQR4_${stamp}.ipm`;
+}
 
 // ==========================================
 // ENDPOINT (Isolé - CARD ALIAS PAN Criteria)
@@ -266,6 +286,95 @@ app.post("/api/v1/clearing/generate-addendum", async (req, res) => {
     return res.status(500).json({ success: false, error: error.message });
   }
 });
+
+// ==========================================
+// Mixed-MTI file — 1240 (real data) + 1740 (synthetic fee) + 1644-696
+// (addendum attached to a subset of the 1240s), split by percentage.
+// Body: { totalRecords, mix: { "1240": {percentage, groups}, "1740": {percentage, feeAmount?}, "1644": {percentage, kind?} } }
+// ==========================================
+app.post("/api/v1/clearing/generate-mixed", async (req, res) => {
+  const body = req.body || {};
+  const requestStartedAt = Date.now();
+
+  log(`➡️  [REQUEST] POST /api/v1/clearing/generate-mixed | totalRecords=${body.totalRecords}`);
+
+  try {
+    const { fileName, counts } = await generateMixedMtiIPM(body);
+    const durationMs = Date.now() - requestStartedAt;
+
+    log(`⬅️  [RESPONSE] POST /api/v1/clearing/generate-mixed | status=200 | duration=${durationMs}ms | file=${fileName}`);
+    return res.status(200).json({ success: true, file: fileName, counts });
+  } catch (error) {
+    const durationMs = Date.now() - requestStartedAt;
+    logError("❌ Erreur service:", error.message);
+    log(`⬅️  [RESPONSE] POST /api/v1/clearing/generate-mixed | status=400 | duration=${durationMs}ms | error=${error.message}`);
+    return res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+// ==========================================
+// TQR4 fixed-width file (804 chars/record) — defaults built in.
+// Body (all optional):
+//   { count?: 1, overrides?: {...applied to every record}, records?: [ {...partial fields} ] }
+// Precedence: defaults < overrides < record
+// Query: ?format=json returns JSON, otherwise the .txt is downloaded (?filename=x.txt)
+// ==========================================
+app.post("/api/v1/clearing/generate-tqr4", async (req, res) => {
+  const requestStartedAt = Date.now();
+  const { count = 1, overrides = {}, records } = req.body || {};
+
+  const rows = Array.isArray(records) && records.length
+    ? records
+    : Array.from({ length: Number(count) || 0 }, () => ({}));
+
+  log(`➡️  [REQUEST] POST /api/v1/clearing/generate-tqr4 | records=${rows.length}`);
+
+  if (rows.length <= 0) {
+    return res.status(400).json({ success: false, error: "'count' doit être un entier positif." });
+  }
+
+  const unknown = [...Object.keys(overrides), ...rows.flatMap((r) => Object.keys(r))]
+    .find((k) => !TQR4_KEYS.has(k));
+  if (unknown) {
+    return res.status(400).json({
+      success: false,
+      error: `Champ inconnu "${unknown}". Champs valides: ${[...TQR4_KEYS].join(", ")}`,
+    });
+  }
+
+  try {
+    const lines = rows.map((row, i) => {
+      try {
+        return buildTqr4Record({ ...TQR4_DEFAULTS, ...overrides, ...row });
+      } catch (e) {
+        throw new Error(`Record ${i + 1}: ${e.message}`);
+      }
+    });
+
+    // Build the file name; if it already exists (same second), add a counter
+    let fileName = tqr4FileName();
+    let fullPath = path.join(OUTPUT_DIR, fileName);
+    for (let n = 1; fs.existsSync(fullPath); n++) {
+      fileName = tqr4FileName().replace(/\.ipm$/, `_${n}.ipm`);
+      fullPath = path.join(OUTPUT_DIR, fileName);
+    }
+
+    await fs.promises.writeFile(fullPath, lines.join("\n") + "\n", "utf8");
+
+    const durationMs = Date.now() - requestStartedAt;
+    log(`⬅️  [RESPONSE] POST /api/v1/clearing/generate-tqr4 | status=200 | duration=${durationMs}ms | file=${fileName}`);
+
+    return res.status(200).json({
+      success: true,
+      file: fileName,
+      recordsGenerated: lines.length,
+    });
+  } catch (error) {
+    logError("❌ Erreur service:", error.message);
+    return res.status(422).json({ success: false, error: error.message });
+  }
+});
+
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {

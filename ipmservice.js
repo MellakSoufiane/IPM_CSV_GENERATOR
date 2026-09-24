@@ -12,6 +12,7 @@ const { build1644 } = require("./mapper1644");
 const { build1740 } = require("./mapper1740");
 const { log, logError, logDbQuery, logTask } = require("./logger");
 
+
 // Wraps client.query so every DB call logs its request (SQL + params) and
 // its response (row count + duration), or the error if it fails.
 async function loggedQuery(client, label, sql, params) {
@@ -37,7 +38,7 @@ if (!fs.existsSync(OUTPUT_DIR)) {
 // Colonnes exactes attendues par cardutil
 const CSV_COLUMNS = [
   "MTI","DE2","DE3","DE4","DE5","DE6","DE12","DE14","DE22","DE23","DE24","DE25","DE26",
-  "DE30","DE31","DE33","DE37","DE38","DE40","DE41","DE42","DE48","DE49","DE50",
+  "DE31","DE33","DE37","DE38","DE40","DE41","DE42","DE48","DE49","DE50","DE51",
   "DE63","DE71","DE73","DE93","DE94","DE95","DE100","PDS0023","PDS0052","PDS0122",
   "PDS0148","PDS0158","PDS0165","DE43_NAME","DE43_SUBURB","DE43_POSTCODE","ICC_DATA"
 ];
@@ -697,4 +698,4 @@ async function generateSecondPresentmentIPM(groups) {
       }
     }
 
-    module.exports = { generateIPM, generateMultiCriteriaIPM, generateMultiClearingIPM, generateMultiCriteriaIPM2, generateMultiCriteriaIPMMassive, generateChargebackIPM, generateSecondPresentmentIPM, generateFeeIPM, generateAddendumIPM };
+    module.exports = { generateIPM, generateMultiCriteriaIPM, generateMultiClearingIPM, generateMultiCriteriaIPM2, generateMultiCriteriaIPMMassive, generateChargebackIPM, generateSecondPresentmentIPM, generateFeeIPM, generateAddendumIPM, OUTPUT_DIR };

@@ -122,12 +122,12 @@ function build1240(row, inputPan, de71) {
     DE24: "200",
     DE25: "1401",
     DE26: row.card_acceptor_activity || "5542",
-    DE30: "000000010000000000000000",
+    //DE30: "000000010000000000000000",
     DE31: `0230120${yearDigit}${dayOfYear}${seq}${chk}`, // Concaténation des sous-éléments
     DE33: row.acquirer_institution_code || "002108",
     DE37: row.reference_number || "000000000000",
     DE38: row.authorization_code || "030160",
-    DE40: "100",
+    //DE40: "100",
     DE41: row.card_acceptor_term_id || "03350022",
     DE42: pad(row.card_acceptor_id, 15),
     
