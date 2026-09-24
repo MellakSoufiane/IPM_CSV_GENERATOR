@@ -132,9 +132,9 @@ function build1240(row, inputPan, de71) {
     DE42: pad(row.card_acceptor_id, 15),
     
     // Découpage direct de la DE43 pour les colonnes CSV
-    DE43_NAME: "BP CONNECT RIVERSIDE",
-    DE43_SUBURB: "WHANGAREI",
-    DE43_POSTCODE: "0112",
+    DE43_NAME: "TEST MERCHANT NAME",
+    DE43_SUBURB: "TEST CITY",
+    DE43_POSTCODE: "TEST ZIP",
     
     DE48: de48FullString, // On injecte la chaîne concaténée ici
     DE49: row.transaction_currency || "036",
