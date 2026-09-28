@@ -1,7 +1,7 @@
 // ipmservice.js
 require("dotenv").config();
 
-const { Client } = require("pg");
+const { Client, Pool } = require("pg");
 const fs = require("fs");
 const path = require("path");
 const { execSync } = require("child_process");
@@ -54,7 +54,29 @@ function getDateTime() {
   return `${yyyy}${mm}${dd}_${hh}${mi}${ss}`;
 }
 
-// Fonction utilitaire pour traiter le fichier et appeler cardutil
+// Convertit un CSV déjà écrit sur disque en fichier IPM via cardutil. Le CSV
+// est conservé dans OUTPUT_DIR (pas de suppression) pour rester consultable.
+// Extrait de finalizeAndConvert pour être réutilisable par les générateurs
+// qui écrivent leur CSV en streaming.
+async function convertCsvToIpm(csvFile) {
+  const finalFileName = `HPS_MCI_Clearing_File_${getDateTime()}.ipm`;
+  const finalFilePath = path.join(OUTPUT_DIR, finalFileName);
+
+  log("Conversion du CSV vers IPM via cardutil...");
+  const conversionStartedAt = Date.now();
+  // On passe les chemins complets à la commande
+	const PYTHON = "C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python311\\python.exe";
+	const converter = path.join(__dirname, "csv_to_ipm.py");
+	execSync(`"${PYTHON}" "${converter}" "${csvFile}" -o "${finalFilePath}" --out-encoding cp500`, { stdio: "inherit" });
+
+  return path.basename(finalFilePath);
+}
+
+// Fonction utilitaire pour traiter le fichier et appeler cardutil.
+// Écrit le CSV en streaming (au lieu de construire une seule grosse chaîne en
+// mémoire puis writeFileSync) : indispensable à partir de quelques centaines
+// de milliers d'enregistrements, sous peine de pics mémoire et de blocage
+// prolongé de l'event loop lors de l'écriture finale.
 async function finalizeAndConvert(records) {
   logTask("finalizeAndConvert:start", { recordCount: records.length });
 
@@ -63,36 +85,32 @@ async function finalizeAndConvert(records) {
     fs.mkdirSync(OUTPUT_DIR, { recursive: true });
   }
 
-  let csvContent = CSV_COLUMNS.join(",") + "\n";
-  records.forEach(record => {
-    const rowArr = CSV_COLUMNS.map(col => {
+  const timestamp = Date.now();
+  const csvFile = path.join(OUTPUT_DIR, `extract_${timestamp}.csv`); // CSV dans le dossier output
+  const stream = fs.createWriteStream(csvFile);
+  stream.write(CSV_COLUMNS.join(",") + "\n");
+
+  for (const record of records) {
+    const row = CSV_COLUMNS.map(col => {
       let val = record[col] !== undefined ? record[col] : "";
       if (String(val).includes(",")) val = `"${val}"`;
       return val;
-    });
-    csvContent += rowArr.join(",") + "\n";
-  });
+    }).join(",") + "\n";
 
-  const timestamp = Date.now();
-  const csvFile = path.join(OUTPUT_DIR, `extract_${timestamp}.csv`); // CSV dans le dossier output
-  fs.writeFileSync(csvFile, csvContent);
+    if (!stream.write(row)) {
+      await new Promise(resolve => stream.once("drain", resolve));
+    }
+  }
+
+  await new Promise((resolve, reject) => {
+    stream.end(err => (err ? reject(err) : resolve()));
+  });
   log(`Fichier CSV généré : ${csvFile}`);
   logTask("finalizeAndConvert:csv-written", { csvFile });
 
-  const finalFileName = `HPS_MCI_Clearing_File_${getDateTime()}.ipm`;
-  const finalFilePath = path.join(OUTPUT_DIR, finalFileName);
-
-  log("Conversion du CSV vers IPM via cardutil...");
-  const conversionStartedAt = Date.now();
-  // On passe les chemins complets à la commande
-  execSync(`mci_csv_to_ipm "${csvFile}" -o "${finalFilePath}" --out-encoding cp500`, { stdio: "inherit" });
-  logTask("finalizeAndConvert:cardutil-done", { durationMs: Date.now() - conversionStartedAt, finalFilePath });
-
-  // Nettoyage du fichier CSV intermédiaire
-  fs.unlinkSync(csvFile);
-
-  logTask("finalizeAndConvert:end", { file: path.basename(finalFilePath) });
-  return path.basename(finalFilePath); // Retourne le chemin complet du fichier généré
+  const finalFileName = await convertCsvToIpm(csvFile);
+  logTask("finalizeAndConvert:end", { file: finalFileName });
+  return finalFileName; // Retourne le nom du fichier généré
 }
 async function writeRecord(stream, record) {
   const row = CSV_COLUMNS.map(col => {
@@ -165,51 +183,105 @@ async function generateIPM(pan, aliaspan) {
   }
 }
 
+// Colonnes réellement utilisées par build1240 (cf. mapper1240.js). La table
+// approved_authorization a ~230 colonnes et une largeur moyenne de ~6 Ko/ligne ;
+// un "SELECT *" sur des lots de plusieurs milliers de références multiplie le
+// volume transféré par ~6x pour rien. reference_number est inclus pour le
+// mapping ligne -> pan.
+const BUILD1240_COLUMNS = [
+  "reference_number", "processing_code", "transaction_amount", "billing_amount",
+  "transaction_local_date", "end_expiry_date", "pos_data", "card_acceptor_activity",
+  "acquirer_institution_code", "authorization_code", "card_acceptor_term_id",
+  "card_acceptor_id", "transaction_currency", "transaction_id", "reason_code",
+  "chip_transaction_amount", "chip_issuer_application_data", "chip_application_cryptogram",
+  "chip_unpredictable_number",
+];
+
+// Nombre de références par requête ANY($1) et nombre de requêtes lancées en
+// parallèle sur le pool. Sur cette table (4.4M lignes / 5 Go), Postgres bascule
+// sur un Seq Scan dès que le tableau ANY() dépasse quelques centaines
+// d'éléments (moins cher pour lui qu'autant de sondes d'index) — et ce scan
+// complet coûte à peu près le même temps fixe (~3-4s, table en cache) quelle
+// que soit la taille du tableau. Mieux vaut donc peu de GROS lots que
+// beaucoup de petits : chaque lot supplémentaire répète le coût fixe du scan.
+const REFERENCE_BATCH_SIZE = 100000;
+const DB_QUERY_CONCURRENCY = 4;
+
+// Récupère les lignes approved_authorization pour un ensemble de groupes
+// { pan, references: [...] }, en un minimum d'allers-retours DB (lots de
+// REFERENCE_BATCH_SIZE références, DB_QUERY_CONCURRENCY requêtes en vol).
+// Une référence -> le(s) pan(s) du/des groupe(s) qui la porte(nt) : si la même
+// référence apparaît dans plusieurs groupes, une entrée est produite par
+// groupe (comportement identique à l'ancien code, une requête par groupe).
+async function fetchAuthorizationsBatched(groups, { columns = BUILD1240_COLUMNS, label = "fetchAuthorizationsBatched" } = {}) {
+  const startedAt = Date.now();
+  const refToPans = new Map();
+  for (const group of groups) {
+    for (const ref of (group.references || [])) {
+      const key = String(ref).trim();
+      if (!refToPans.has(key)) refToPans.set(key, []);
+      refToPans.get(key).push(group.pan);
+    }
+  }
+  const allRefs = Array.from(refToPans.keys());
+  if (allRefs.length === 0) return [];
+
+  const pool = new Pool({ user: process.env.DB_USER, host: process.env.DB_HOST, database: process.env.DB_NAME, password: process.env.DB_PASSWORD, port: process.env.DB_PORT, max: DB_QUERY_CONCURRENCY });
+  log("🗄️  [DB] Pool de connexions initialisé");
+
+  const allRows = [];
+  try {
+    const batches = [];
+    for (let i = 0; i < allRefs.length; i += REFERENCE_BATCH_SIZE) {
+      batches.push(allRefs.slice(i, i + REFERENCE_BATCH_SIZE));
+    }
+
+    let completed = 0;
+    for (let i = 0; i < batches.length; i += DB_QUERY_CONCURRENCY) {
+      const slice = batches.slice(i, i + DB_QUERY_CONCURRENCY);
+      const results = await Promise.all(slice.map((batch, idx) =>
+        loggedQuery(
+          pool,
+          `${label}:batch-${i + idx + 1}/${batches.length} (${batch.length} refs)`,
+          `SELECT ${columns.join(", ")} FROM approved_authorization WHERE reference_number = ANY($1::text[])`,
+          [batch]
+        )
+      ));
+
+      results.forEach(res => {
+        res.rows.forEach(r => {
+          const key = String(r.reference_number).trim();
+          const pans = refToPans.get(key) || [];
+          // Une ligne DB peut être injectée plusieurs fois si sa référence
+          // appartient à plusieurs groupes (un enregistrement par groupe).
+          pans.forEach(pan => allRows.push({ row: r, panPourFichier: pan }));
+        });
+      });
+
+      completed += slice.length;
+      logTask(`${label}:progress`, {
+        batchesDone: completed,
+        batchesTotal: batches.length,
+        rowsMatchedSoFar: allRows.length,
+        elapsedMs: Date.now() - startedAt
+      });
+    }
+
+    return allRows;
+  } finally {
+    await pool.end();
+    log("🗄️  [DB] Pool fermé");
+  }
+}
+
 // 2. NOUVELLE API (Multi-critères Batch)
 async function generateMultiCriteriaIPM(groups) {
   const startedAt = Date.now();
   const totalReferences = groups.reduce((n, g) => n + (g.references ? g.references.length : 0), 0);
   logTask("generateMultiCriteriaIPM:start", { groups: groups.length, totalReferences });
 
-  const client = new Client({ user: process.env.DB_USER, host: process.env.DB_HOST, database: process.env.DB_NAME, password: process.env.DB_PASSWORD, port: process.env.DB_PORT });
-  await client.connect();
-  log("🗄️  [DB] Connexion établie");
-
-  const allRows = [];
-
   try {
-    for (let i = 0; i < groups.length; i++) {
-      const group = groups[i];
-      const refs = group.references || [];
-      if (refs.length === 0) continue;
-
-      // Un seul aller-retour DB par groupe (au lieu d'un par référence) :
-      // reference_number = ANY($1) remplace la boucle "await client.query" par référence.
-      const res = await loggedQuery(
-        client,
-        `generateMultiCriteriaIPM:group-${i + 1}/${groups.length} (${refs.length} refs)`,
-        `SELECT * FROM approved_authorization WHERE reference_number = ANY($1::text[])`,
-        [refs]
-      );
-
-      // On traite chaque ligne trouvée
-      res.rows.forEach(r => {
-        // ICI : On injecte le group.pan (celui de la requête) au lieu de r.card_number
-        allRows.push({
-          row: r,
-          panPourFichier: group.pan
-        });
-      });
-
-      if ((i + 1) % 25 === 0 || i === groups.length - 1) {
-        logTask("generateMultiCriteriaIPM:progress", {
-          groupsDone: i + 1,
-          groupsTotal: groups.length,
-          rowsMatchedSoFar: allRows.length,
-          elapsedMs: Date.now() - startedAt
-        });
-      }
-    }
+    const allRows = await fetchAuthorizationsBatched(groups, { label: "generateMultiCriteriaIPM" });
     if (allRows.length === 0) throw new Error("Aucune autorisation trouvée pour les références fournies.");
 
     let de71Sequence = 1;
@@ -229,9 +301,6 @@ async function generateMultiCriteriaIPM(groups) {
   } catch (error) {
     logError(`❌ [generateMultiCriteriaIPM] Erreur: ${error.message}`);
     throw error;
-  } finally {
-    await client.end();
-    log("🗄️  [DB] Connexion fermée");
   }
 }
 
@@ -474,8 +543,6 @@ async function generateMultiCriteriaIPMMassive(groups) {
             { stdio: "inherit" }
         );
 
-        fs.unlinkSync(csvFile);
-
         return path.basename(finalFilePath);
 
     } finally {
@@ -631,7 +698,7 @@ async function generateSecondPresentmentIPM(groups) {
     // AssociatedFirstPresentmentNumber(8, = the linked 1240's DE71).
     //   kind "passenger" -> Usage 01 (Passenger Transport, General Ticket)
     //   kind "lodging"   -> Usage 06 (Lodging Summary)
-    function build1644Addendum(row, kind, assocDe71, de71) {
+    function build1644Addendum(row, kind, assocDe71, de71, functionCode = "696") {
       const usage = kind === "lodging" ? "06" : "01";
       const pds0501 = usage + "000" + "001" + String(assocDe71).padStart(8, "0"); // 16 chars
       let de48 = _pds("0501", pds0501);
@@ -652,7 +719,11 @@ async function generateSecondPresentmentIPM(groups) {
       }
       return {
         MTI: "1644",
-        DE24: "696",
+        // 696 (Financial Detail Addendum) est le seul code dont on connaît le
+        // contenu réel. 640/685 (et tout autre code passé) réutilisent la même
+        // structure de message avec juste DE24 différent (accord explicite :
+        // suffisant pour reproduire une distribution de volumes par function code).
+        DE24: functionCode,
         DE33: row.acquirer_institution_code || "002108",
         DE48: de48,
         DE71: de71,
@@ -698,4 +769,187 @@ async function generateSecondPresentmentIPM(groups) {
       }
     }
 
-    module.exports = { generateIPM, generateMultiCriteriaIPM, generateMultiClearingIPM, generateMultiCriteriaIPM2, generateMultiCriteriaIPMMassive, generateChargebackIPM, generateSecondPresentmentIPM, generateFeeIPM, generateAddendumIPM, OUTPUT_DIR };
+// ============================================================
+// Mixed-MTI file: one IPM file made of a percentage split across
+// 1240 (First Presentment, real DB data), 1740 (Fee Collection,
+// synthetic), and 1644-696 (Financial Detail Addendum, attached to a
+// subset of the 1240 presentments). Percentages apply to a caller-given
+// totalRecords; 1240 references are cycled if fewer than count1240.
+//
+// options = {
+//   totalRecords: 100000,
+//   mix: {
+//     "1240": { percentage: 60, groups: [{ pan, references: [...] }, ...], functionCodes?: { "200": 99.98, "205": 0.02 } },
+//     "1740": { percentage: 25, feeAmount?, pan?, messageReasonCode?, processingCode?, functionCodes?: { "783": 100 } },
+//     "1644": { percentage: 15, kind?: "passenger" | "lodging", functionCodes?: { "696": 99.09, "640": 0.63, "685": 0.22 } }
+//   }
+// }
+// functionCodes values are weights, not required to sum to 100 — pass either
+// percentages or raw counts straight from a report (e.g. {"200": 330010, "205": 65}),
+// they're normalized against their own sum. Omit functionCodes to fall back to a
+// single default code per MTI (200 / 700 / 696).
+// ============================================================
+const ADDENDUM_KINDS = new Set(["passenger", "lodging"]);
+const DEFAULT_SYNTHETIC_PAN = "5367635001039824";
+
+// Répartit `total` unités entre les clés de `weights` au prorata de leur poids
+// (percentages ou comptes bruts, peu importe l'échelle : tout est normalisé par
+// la somme). Méthode du plus grand reste pour que la somme des comptes obtenus
+// soit exactement `total` malgré les arrondis.
+function allocateByWeights(total, weights) {
+  const codes = Object.keys(weights || {});
+  const w = codes.map(c => Number(weights[c]));
+  if (codes.length === 0 || w.some(x => !Number.isFinite(x) || x < 0)) {
+    throw new Error("functionCodes doit être un objet non vide de poids (pourcentages ou comptes) positifs.");
+  }
+  const sumW = w.reduce((a, b) => a + b, 0);
+  if (sumW <= 0) throw new Error("La somme des poids de functionCodes doit être positive.");
+
+  const raw = w.map(x => (total * x) / sumW);
+  const floors = raw.map(Math.floor);
+  const allocated = floors.reduce((a, b) => a + b, 0);
+  const remainder = total - allocated;
+
+  const byFracDesc = raw
+    .map((v, i) => ({ i, frac: v - floors[i] }))
+    .sort((a, b) => b.frac - a.frac);
+
+  const counts = {};
+  codes.forEach((c, i) => { counts[c] = floors[i]; });
+  for (let k = 0; k < remainder; k++) {
+    counts[codes[byFracDesc[k % byFracDesc.length].i]]++;
+  }
+  return counts; // { code: count }, sum(counts) === total
+}
+
+// Transforme un objet {code: count} en tableau de `total` codes (blocs
+// contigus par code — suffisant pour reproduire une distribution de volumes ;
+// pas d'entrelacement aléatoire).
+function expandCodeCounts(counts) {
+  const seq = [];
+  for (const [code, n] of Object.entries(counts)) {
+    for (let k = 0; k < n; k++) seq.push(code);
+  }
+  return seq;
+}
+
+// Résumé {code: occurrences} d'un tableau de codes, pour le logging.
+function countBy(arr) {
+  const out = {};
+  for (const v of arr) out[v] = (out[v] || 0) + 1;
+  return out;
+}
+
+async function generateMixedMtiIPM(options) {
+  const startedAt = Date.now();
+  const totalRecords = Number(options.totalRecords);
+  if (!Number.isInteger(totalRecords) || totalRecords <= 0) {
+    throw new Error("'totalRecords' est requis et doit être un entier positif.");
+  }
+
+  const mix = options.mix || {};
+  const cfg1240 = mix["1240"];
+  const cfg1740 = mix["1740"];
+  const cfg1644 = mix["1644"];
+  if (!cfg1240 || !cfg1740 || !cfg1644) {
+    throw new Error("'mix' doit contenir les clés '1240', '1740' et '1644'.");
+  }
+
+  const pct1240 = Number(cfg1240.percentage);
+  const pct1740 = Number(cfg1740.percentage);
+  const pct1644 = Number(cfg1644.percentage);
+  const pctSum = pct1240 + pct1740 + pct1644;
+  if (![pct1240, pct1740, pct1644].every(p => Number.isFinite(p) && p >= 0) || Math.abs(pctSum - 100) > 0.01) {
+    throw new Error(`Les pourcentages 1240/1740/1644 doivent être des nombres positifs dont la somme fait 100 (actuellement ${pctSum}).`);
+  }
+  if (!Array.isArray(cfg1240.groups) || cfg1240.groups.length === 0) {
+    throw new Error(`'mix["1240"].groups' est requis (même format que generate-reference : [{ pan, references: [...] }]).`);
+  }
+
+  // Comptes arrondis pour 1240/1740 ; 1644 prend le reste pour que la somme
+  // totale corresponde exactement à totalRecords malgré les arrondis.
+  const count1240 = Math.round(totalRecords * pct1240 / 100);
+  const count1740 = Math.round(totalRecords * pct1740 / 100);
+  const count1644 = totalRecords - count1240 - count1740;
+
+  if (count1240 <= 0) throw new Error("Le pourcentage 1240 doit produire au moins 1 enregistrement.");
+  if (count1644 < 0) throw new Error("Pourcentages invalides : la part 1644 calculée est négative.");
+  if (count1644 > count1240) {
+    throw new Error(`Le nombre d'addenda 1644 (${count1644}) ne peut pas dépasser le nombre de présentations 1240 (${count1240}) : chaque addendum doit être rattaché à une présentation distincte.`);
+  }
+
+  logTask("generateMixedMtiIPM:start", { totalRecords, count1240, count1740, count1644 });
+
+  const matchedRows = await fetchAuthorizationsBatched(cfg1240.groups, { label: "generateMixedMtiIPM:1240" });
+  if (matchedRows.length === 0) throw new Error("Aucune autorisation trouvée pour les références 1240 fournies.");
+  logTask("generateMixedMtiIPM:1240-fetched", {
+    referencesMatched: matchedRows.length,
+    count1240,
+    willCycle: count1240 > matchedRows.length
+  });
+
+  const kind = ADDENDUM_KINDS.has(cfg1644.kind) ? cfg1644.kind : "passenger";
+  const feeAmount = cfg1740.feeAmount != null ? Number(cfg1740.feeAmount) : 11.26;
+  const feePan = cfg1740.pan || DEFAULT_SYNTHETIC_PAN;
+
+  // Répartition des DE24 (function code) au sein de chaque MTI. Sans
+  // functionCodes fourni, on retombe sur un seul code par défaut (comportement
+  // identique à la première version de cet endpoint).
+  const codes1240 = expandCodeCounts(allocateByWeights(count1240, cfg1240.functionCodes || { "200": 1 }));
+  const codes1644 = expandCodeCounts(allocateByWeights(count1644, cfg1644.functionCodes || { "696": 1 }));
+  const codes1740 = expandCodeCounts(allocateByWeights(count1740, cfg1740.functionCodes || { "700": 1 }));
+
+  logTask("generateMixedMtiIPM:function-codes", {
+    mti1240: countBy(codes1240),
+    mti1644: countBy(codes1644),
+    mti1740: countBy(codes1740),
+  });
+
+  let de71Sequence = 1;
+  const nextDe71 = () => String(de71Sequence++).padStart(8, "0");
+  let totalAmountMinor = 0;
+
+  const records = [build1644("PRE", {}, nextDe71())];
+
+  // 1240 (+ jusqu'à count1644 addenda 1644-xxx juste après leur présentation).
+  for (let i = 0; i < count1240; i++) {
+    const item = matchedRows[i % matchedRows.length];
+    const presentmentDe71 = nextDe71();
+    records.push(build1240_ref(item.row, item.panPourFichier, presentmentDe71, { functionCode: codes1240[i] }));
+    totalAmountMinor += Math.round(Number(item.row.billing_amount || 0) * 100);
+
+    if (i < count1644) {
+      records.push(build1644Addendum(item.row, kind, presentmentDe71, nextDe71(), codes1644[i]));
+    }
+  }
+
+  // 1740 synthétiques (pas de lookup DB : row quasi vide, tous les champs
+  // retombent sur leurs valeurs par défaut dans build1740Fee). transaction_local_date
+  // doit rester une vraie date : formatDatetime(undefined) renvoie "0000-00-00 ...",
+  // que cardutil (dateutil côté Python) rejette avec "year 0 is out of range".
+  const syntheticFeeRow = { transaction_local_date: new Date() };
+  for (let i = 0; i < count1740; i++) {
+    records.push(build1740Fee(syntheticFeeRow, feePan, nextDe71(), {
+      feeAmount,
+      functionCode: codes1740[i],
+      messageReasonCode: cfg1740.messageReasonCode || "7614",
+      processingCode: cfg1740.processingCode || "190000",
+    }));
+    totalAmountMinor += Math.round(feeAmount * 100);
+  }
+
+  const totalTransactions = 2 + count1240 + count1644 + count1740;
+  records.push(build1644("POST", { totalAmount: String(totalAmountMinor).padStart(16, "0"), totalTransactions }, nextDe71()));
+
+  logTask("generateMixedMtiIPM:records-summary", { count1240, count1644, count1740, totalTransactions, totalAmountMinor });
+
+  const fileName = await finalizeAndConvert(records);
+  logTask("generateMixedMtiIPM:end", { file: fileName, totalDurationMs: Date.now() - startedAt });
+
+  return {
+    fileName,
+    counts: { total: totalTransactions, mti1240: count1240, mti1644: count1644, mti1740: count1740 }
+  };
+}
+
+module.exports = { generateIPM, generateMultiCriteriaIPM, generateMultiClearingIPM, generateMultiCriteriaIPM2, generateMultiCriteriaIPMMassive, generateChargebackIPM, generateSecondPresentmentIPM, generateFeeIPM, generateAddendumIPM, generateMixedMtiIPM };

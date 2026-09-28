@@ -158,7 +158,7 @@ function build1240(row, inputPan, de71) {
     PDS0165: "M",
     
     // Génération finale du string EMV hexadécimal
-    ICC_DATA: buildEMV(emvTags)
+    ICC_DATA: ""
   };
 }
 
