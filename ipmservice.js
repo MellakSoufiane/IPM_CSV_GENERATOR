@@ -12,7 +12,14 @@ const { build1644 } = require("./mapper1644");
 const { build1740 } = require("./mapper1740");
 const { log, logError, logDbQuery, logTask } = require("./logger");
 
-
+const DB_CONFIG = {
+  user: process.env.DB_USER,
+  host: process.env.DB_HOST,
+  database: process.env.DB_NAME,
+  password: process.env.DB_PASSWORD,
+  port: Number(process.env.DB_PORT),
+  ssl: process.env.DB_SSL === "false" ? false : { rejectUnauthorized: false },
+};
 // Wraps client.query so every DB call logs its request (SQL + params) and
 // its response (row count + duration), or the error if it fails.
 async function loggedQuery(client, label, sql, params) {
@@ -134,8 +141,7 @@ async function generateIPM(pan, aliaspan) {
   const maskedPan = pan.replace(/.(?=.{4})/g, "*");
   logTask("generateIPM:start", { pan: maskedPan, aliasPan: aliaspan });
 
-  const client = new Client({ user: process.env.DB_USER, host: process.env.DB_HOST, database: process.env.DB_NAME, password: process.env.DB_PASSWORD, port: process.env.DB_PORT });
-
+const client = new Client(DB_CONFIG);
   logTask("generateIPM:db-connect", { host: process.env.DB_HOST, database: process.env.DB_NAME });
   await client.connect();
   log("🗄️  [DB] Connexion établie");
@@ -226,7 +232,7 @@ async function fetchAuthorizationsBatched(groups, { columns = BUILD1240_COLUMNS,
   const allRefs = Array.from(refToPans.keys());
   if (allRefs.length === 0) return [];
 
-  const pool = new Pool({ user: process.env.DB_USER, host: process.env.DB_HOST, database: process.env.DB_NAME, password: process.env.DB_PASSWORD, port: process.env.DB_PORT, max: DB_QUERY_CONCURRENCY });
+	const pool = new Pool({ ...DB_CONFIG, max: DB_QUERY_CONCURRENCY });
   log("🗄️  [DB] Pool de connexions initialisé");
 
   const allRows = [];
@@ -361,8 +367,7 @@ function buildClearingPart(allRows, parts, partIndex) {
 // authorization is split across `parts` (default 2) separate IPM files.
 async function generateMultiClearingIPM(groups, parts = 2) {
   const nParts = Math.max(2, parseInt(parts, 10) || 2);
-  const client = new Client({ user: process.env.DB_USER, host: process.env.DB_HOST, database: process.env.DB_NAME, password: process.env.DB_PASSWORD, port: process.env.DB_PORT });
-  await client.connect();
+const client = new Client(DB_CONFIG);  await client.connect();
   const allRows = [];
 
   try {
@@ -390,8 +395,7 @@ async function generateMultiClearingIPM(groups, parts = 2) {
 
 // 2. NOUVELLE API (Multi-critères Batch)
 async function generateMultiCriteriaIPM2(groups) {
-  const client = new Client({ user: process.env.DB_USER, host: process.env.DB_HOST, database: process.env.DB_NAME, password: process.env.DB_PASSWORD, port: process.env.DB_PORT });
-  await client.connect();
+const client = new Client(DB_CONFIG);  await client.connect();
   const allRows = [];
   
   try {
@@ -438,13 +442,7 @@ async function generateMultiCriteriaIPM2(groups) {
   }
 }
 async function generateMultiCriteriaIPMMassive(groups) {
-    const client = new Client({
-        user: process.env.DB_USER,
-        host: process.env.DB_HOST,
-        database: process.env.DB_NAME,
-        password: process.env.DB_PASSWORD,
-        port: process.env.DB_PORT
-    });
+   const client = new Client(DB_CONFIG);
 
     await client.connect();
 
@@ -558,8 +556,7 @@ async function generateMultiCriteriaIPMMassive(groups) {
 // approved_authorization and builds a single IPM file.
 // ============================================================
 async function generateWithOverrides(groups, defaults = {}) {
-  const client = new Client({ user: process.env.DB_USER, host: process.env.DB_HOST, database: process.env.DB_NAME, password: process.env.DB_PASSWORD, port: process.env.DB_PORT });
-  await client.connect();
+const client = new Client(DB_CONFIG);  await client.connect();
   const allRows = [];
   try {
     for (const group of groups) {
@@ -625,8 +622,7 @@ async function generateSecondPresentmentIPM(groups) {
     async function generateFeeIPM(groupsOrOptions) {
       if (Array.isArray(groupsOrOptions)) {
         const groups = groupsOrOptions;
-        const client = new Client({ user: process.env.DB_USER, host: process.env.DB_HOST, database: process.env.DB_NAME, password: process.env.DB_PASSWORD, port: process.env.DB_PORT });
-        await client.connect();
+const client = new Client(DB_CONFIG);        await client.connect();
         const allRows = [];
         try {
           for (const group of groups) {
@@ -738,8 +734,7 @@ async function generateSecondPresentmentIPM(groups) {
     // Generate a First Presentment/1240 with an immediately-following Financial Detail
     // Addendum/1644-696 for each authorization (looked up by RRN). kind: passenger|lodging.
     async function generateAddendumIPM(groups, kind = "passenger") {
-      const client = new Client({ user: process.env.DB_USER, host: process.env.DB_HOST, database: process.env.DB_NAME, password: process.env.DB_PASSWORD, port: process.env.DB_PORT });
-      await client.connect();
+const client = new Client(DB_CONFIG);      await client.connect();
       const allRows = [];
       try {
         for (const group of groups) {
