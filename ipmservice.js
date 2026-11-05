@@ -4,6 +4,7 @@ require("dotenv").config();
 const { Client, Pool } = require("pg");
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const { execSync } = require("child_process");
 
 const { build1240 } = require("./mapper1240");
@@ -61,12 +62,19 @@ function getDateTime() {
   return `${yyyy}${mm}${dd}_${hh}${mi}${ss}`;
 }
 
+// Suffixe aléatoire des noms de fichiers : l'horodatage seul (à la seconde pour
+// l'IPM, à la milliseconde pour le CSV) ne suffit pas à distinguer des appels
+// API simultanés, qui s'écraseraient alors mutuellement.
+function uniqueSuffix() {
+  return crypto.randomBytes(4).toString("hex");
+}
+
 // Convertit un CSV déjà écrit sur disque en fichier IPM via cardutil. Le CSV
 // est conservé dans OUTPUT_DIR (pas de suppression) pour rester consultable.
 // Extrait de finalizeAndConvert pour être réutilisable par les générateurs
 // qui écrivent leur CSV en streaming.
 async function convertCsvToIpm(csvFile) {
-  const finalFileName = `HPS_MCI_Clearing_File_${getDateTime()}.ipm`;
+  const finalFileName = `HPS_MCI_Clearing_File_${getDateTime()}_${uniqueSuffix()}.ipm`;
   const finalFilePath = path.join(OUTPUT_DIR, finalFileName);
 
   log("Conversion du CSV vers IPM via cardutil...");
@@ -93,7 +101,7 @@ async function finalizeAndConvert(records) {
   }
 
   const timestamp = Date.now();
-  const csvFile = path.join(OUTPUT_DIR, `extract_${timestamp}.csv`); // CSV dans le dossier output
+  const csvFile = path.join(OUTPUT_DIR, `extract_${timestamp}_${uniqueSuffix()}.csv`); // CSV dans le dossier output
   const stream = fs.createWriteStream(csvFile);
   stream.write(CSV_COLUMNS.join(",") + "\n");
 
@@ -474,7 +482,7 @@ async function generateMultiCriteriaIPMMassive(groups) {
             throw new Error("No authorization found");
 
         const timestamp = Date.now();
-        const csvFile = path.join(OUTPUT_DIR, `extract_${timestamp}.csv`);
+        const csvFile = path.join(OUTPUT_DIR, `extract_${timestamp}_${uniqueSuffix()}.csv`);
 
         const stream = fs.createWriteStream(csvFile);
 
@@ -533,7 +541,7 @@ async function generateMultiCriteriaIPMMassive(groups) {
 
         await new Promise(resolve => stream.end(resolve));
 
-        const finalFileName = `HPS_MCI_Clearing_File_${getDateTime()}.ipm`;
+        const finalFileName = `HPS_MCI_Clearing_File_${getDateTime()}_${uniqueSuffix()}.ipm`;
         const finalFilePath = path.join(OUTPUT_DIR, finalFileName);
 
         execSync(
